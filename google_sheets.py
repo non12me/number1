@@ -79,6 +79,11 @@ SHEET_HEADERS = {
 
 DEFAULT_CONFIG = [
     ["ocr_lado_largo", "2000", "int", "Resolución objetivo OCR", "", "SISTEMA"],
+    ["ocr_perfil", "PP-OCRv6-TINY", "text", "Perfil OCR CPU", "", "SISTEMA"],
+    ["ocr_cpu_threads", "2", "int", "Hilos máximos del OCR", "", "SISTEMA"],
+    ["ocr_min_score", "0.35", "decimal", "Línea OCR mínima conservada", "", "SISTEMA"],
+    ["ocr_recovery_score", "0.75", "decimal", "Umbral para probar B o C", "", "SISTEMA"],
+    ["ocr_lock_minutes", "30", "int", "Duración del lease por job", "", "SISTEMA"],
     ["peso_ocr", "0.35", "decimal", "Peso de confianza OCR", "", "SISTEMA"],
     ["peso_formato", "0.25", "decimal", "Peso de formato válido", "", "SISTEMA"],
     ["peso_etiqueta", "0.20", "decimal", "Peso de etiqueta cercana", "", "SISTEMA"],
@@ -187,13 +192,15 @@ def ensure_workbook_structure(
         spreadsheetId=spreadsheet_id,
         range="'CONFIGURACION'!A2:A",
     ).execute().get("values", [])
-    if not config_values:
+    existing_keys = {str(row[0]) for row in config_values if row}
+    missing_config = [row for row in DEFAULT_CONFIG if row[0] not in existing_keys]
+    if missing_config:
         service.spreadsheets().values().append(
             spreadsheetId=spreadsheet_id,
             range="'CONFIGURACION'!A2",
             valueInputOption="RAW",
             insertDataOption="INSERT_ROWS",
-            body={"values": DEFAULT_CONFIG},
+            body={"values": missing_config},
         ).execute()
 
     return {"sheet_count": len(SHEET_HEADERS), "header_count": len(SHEET_HEADERS)}
