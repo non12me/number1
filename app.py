@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections import Counter
+from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 import streamlit as st
 
@@ -19,10 +21,16 @@ from config import (
 from google_auth import get_google_credentials
 from google_drive import ensure_storage_folders, validate_folder
 from google_sheets import ensure_workbook_structure, read_records
+from local_ocr import OCRModelLoadError, get_ocr_engine
 from models import DocumentType
+from ocr_worker import (
+    process_one_pending_job,
+    recover_expired_ocr_jobs,
+    retry_local_ocr_errors,
+)
 from queue_manager import enqueue_upload, recover_upload_checkpoints
 from upload_manager import prepare_upload
-from utils import pdf_page_count
+from utils import decode_json_from_sheet, pdf_page_count
 
 
 st.set_page_config(
@@ -71,7 +79,7 @@ def render_header() -> None:
     first.metric("Versión", APP_VERSION)
     second.metric("Fase", PROJECT_PHASE)
     third.metric("Carga máxima", f"{MAX_FILES_PER_UPLOAD} archivos")
-    fourth.metric("Gemini", "Desactivado")
+    fourth.metric("OCR", "CPU local")
 
 
 def render_setup() -> None:
@@ -284,11 +292,13 @@ def render_queue() -> None:
         return
 
     counts = Counter(record.get("estado", "SIN_ESTADO") for record in records)
-    columns = st.columns(4)
+    columns = st.columns(6)
     columns[0].metric("Jobs totales", len(records))
     columns[1].metric("Pendientes", counts.get("PENDIENTE", 0))
-    columns[2].metric("Confirmados", counts.get("CONFIRMADO", 0))
-    columns[3].metric("Errores", counts.get("ERROR", 0))
+    columns[2].metric("Procesando", counts.get("PROCESANDO", 0))
+    columns[3].metric("OCR local", counts.get("EXTRAIDO_LOCAL", 0))
+    columns[4].metric("Revisión", counts.get("NECESITA_REVISION", 0))
+    columns[5].metric("Errores", counts.get("ERROR", 0))
 
     if st.button("Recuperar cargas interrumpidas", width="stretch"):
         recovered = recover_upload_checkpoints(
@@ -322,19 +332,233 @@ def render_queue() -> None:
         st.info("OCR_COLA todavía no contiene documentos.")
 
 
+def _initialize_worker_state() -> None:
+    defaults = {
+        "ocr_worker_owner": str(uuid4()),
+        "ocr_batch_running": False,
+        "ocr_batch_stop": False,
+        "ocr_batch_target": 1,
+        "ocr_batch_remaining": 0,
+        "ocr_batch_processed": 0,
+        "ocr_batch_started_at": "",
+        "ocr_batch_results": [],
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+@st.fragment(run_every="1s")
+def render_ocr_worker() -> None:
+    _initialize_worker_state()
+    running = bool(st.session_state["ocr_batch_running"])
+    batch_size = st.selectbox(
+        "Cantidad del lote",
+        options=[1, 5, 10],
+        disabled=running,
+        key="ocr_batch_size_selector",
+    )
+    start_column, stop_column = st.columns(2)
+    if start_column.button(
+        "Procesar siguientes documentos",
+        type="primary",
+        disabled=running,
+        width="stretch",
+    ):
+        st.session_state["ocr_batch_running"] = True
+        st.session_state["ocr_batch_stop"] = False
+        st.session_state["ocr_batch_target"] = int(batch_size)
+        st.session_state["ocr_batch_remaining"] = int(batch_size)
+        st.session_state["ocr_batch_processed"] = 0
+        st.session_state["ocr_batch_started_at"] = datetime.now(timezone.utc).isoformat()
+        st.session_state["ocr_batch_results"] = []
+        running = True
+
+    if stop_column.button(
+        "Detener después del actual",
+        disabled=not running,
+        width="stretch",
+    ):
+        st.session_state["ocr_batch_stop"] = True
+
+    target = int(st.session_state["ocr_batch_target"])
+    processed = int(st.session_state["ocr_batch_processed"])
+    progress_value = min(1.0, processed / max(1, target))
+    st.progress(progress_value, text=f"Completados {processed} de {target}")
+
+    if running and st.session_state["ocr_batch_stop"]:
+        st.session_state["ocr_batch_running"] = False
+        st.session_state["ocr_batch_stop"] = False
+        st.info("Lote detenido después del último documento terminado.")
+        running = False
+
+    if running and int(st.session_state["ocr_batch_remaining"]) > 0:
+        credentials = get_credentials()
+        result = process_one_pending_job(
+            credentials=credentials,
+            spreadsheet_id=get_secret("GOOGLE_SHEET_ID"),
+            owner=str(st.session_state["ocr_worker_owner"]),
+            user_email=get_secret("APP_ADMIN_EMAIL") or "ADMIN_NO_CONFIGURADO",
+        )
+        results = list(st.session_state["ocr_batch_results"])
+        results.append(result)
+        st.session_state["ocr_batch_results"] = results[-10:]
+
+        status = result.get("status", "")
+        if status not in {"OCUPADO", "SIN_PENDIENTES", "LOCK_PERDIDO"}:
+            st.session_state["ocr_batch_processed"] += 1
+            st.session_state["ocr_batch_remaining"] -= 1
+        if status in {"SIN_PENDIENTES", "LOCK_PERDIDO"}:
+            st.session_state["ocr_batch_running"] = False
+        if int(st.session_state["ocr_batch_remaining"]) <= 0:
+            st.session_state["ocr_batch_running"] = False
+
+    results = list(st.session_state["ocr_batch_results"])
+    if results:
+        st.dataframe(results, hide_index=True, width="stretch")
+    if st.session_state["ocr_batch_running"]:
+        st.info("Procesando secuencialmente. Mantén esta pestaña abierta.")
+    elif results:
+        st.success("El lote actual terminó o quedó detenido con checkpoint guardado.")
+
+
+def render_ocr_result_viewer() -> None:
+    try:
+        records = read_records(
+            get_credentials(),
+            get_secret("GOOGLE_SHEET_ID"),
+            "OCR_COLA",
+        )
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"No se pudieron leer los resultados. Error: {type(exc).__name__}.")
+        return
+    processed = [
+        record
+        for record in records
+        if record.get("estado") in {"EXTRAIDO_LOCAL", "NECESITA_REVISION"}
+        and record.get("datos_extraidos_json")
+    ]
+    if not processed:
+        st.info("Todavía no hay resultados OCR locales para inspeccionar.")
+        return
+    selected_id = st.selectbox(
+        "Resultado a inspeccionar",
+        options=[record["job_id"] for record in reversed(processed)],
+        format_func=lambda job_id: next(
+            (
+                f"{record.get('nombre_original', '')} · {record.get('estado', '')} · {job_id[:8]}"
+                for record in processed
+                if record.get("job_id") == job_id
+            ),
+            job_id,
+        ),
+    )
+    selected = next(record for record in processed if record["job_id"] == selected_id)
+    try:
+        payload = decode_json_from_sheet(selected["datos_extraidos_json"])
+    except Exception:  # noqa: BLE001
+        st.error("El checkpoint OCR no contiene JSON válido.")
+        return
+
+    first, second, third, fourth = st.columns(4)
+    first.metric("Estado", selected.get("estado", ""))
+    second.metric("Líneas", payload.get("line_count", 0))
+    second_value = float(payload.get("mean_ocr_confidence", 0) or 0)
+    third.metric("Confianza OCR", f"{second_value:.1%}")
+    fourth.metric("Calidad más débil", payload.get("weakest_quality", ""))
+    st.caption(f"Perfil: {payload.get('engine_profile', '')}")
+
+    quality_rows = []
+    line_rows = []
+    qr_rows = []
+    for page in payload.get("pages", []):
+        quality = page.get("quality", {})
+        quality_rows.append({"pagina": page.get("page"), **quality})
+        qr = page.get("qr", {})
+        if qr.get("detected"):
+            qr_rows.append(
+                {
+                    "pagina": page.get("page"),
+                    "valido": qr.get("valid"),
+                    "fuente": qr.get("source_image"),
+                    "campos": qr.get("fields"),
+                    "advertencias": qr.get("warnings"),
+                }
+            )
+        for line in page.get("lines", []):
+            line_rows.append(
+                {
+                    "pagina": line.get("page"),
+                    "texto": line.get("text"),
+                    "confianza": line.get("confidence"),
+                    "version": line.get("preprocessing_version"),
+                    "coordenadas": line.get("coordinates"),
+                }
+            )
+    st.markdown("#### Calidad")
+    st.dataframe(quality_rows, hide_index=True, width="stretch")
+    if qr_rows:
+        st.markdown("#### QR")
+        st.dataframe(qr_rows, hide_index=True, width="stretch")
+    st.markdown("#### Texto OCR")
+    if line_rows:
+        st.dataframe(line_rows, hide_index=True, width="stretch")
+        with st.expander("Ver texto continuo"):
+            st.text("\n".join(row["texto"] for row in line_rows))
+    else:
+        st.error("No se reconocieron líneas; este documento requiere revisión o nueva foto.")
+
+
+def render_local_ocr() -> None:
+    st.subheader("OCR local en CPU")
+    if not infrastructure_ready():
+        st.warning("Completa la infraestructura antes de procesar.")
+        return
+    st.warning(
+        "La primera ejecución descarga los modelos gratuitos y puede tardar varios minutos. "
+        "Streamlit debe permanecer abierto durante el lote actual."
+    )
+    first, second, third = st.columns(3)
+    if first.button("Probar carga del modelo", width="stretch"):
+        try:
+            bundle = get_ocr_engine()
+            st.success(f"Modelo local preparado: {bundle.profile}.")
+        except OCRModelLoadError as exc:
+            st.error(str(exc))
+    if second.button("Recuperar locks OCR vencidos", width="stretch"):
+        recovered = recover_expired_ocr_jobs(
+            get_credentials(),
+            get_secret("GOOGLE_SHEET_ID"),
+        )
+        st.success(f"Jobs recuperados: {recovered}.")
+    if third.button("Reintentar errores OCR", width="stretch"):
+        retried = retry_local_ocr_errors(
+            get_credentials(),
+            get_secret("GOOGLE_SHEET_ID"),
+        )
+        st.success(f"Jobs devueltos a PENDIENTE: {retried}.")
+    render_ocr_worker()
+    st.divider()
+    render_ocr_result_viewer()
+
+
 def main() -> None:
     render_header()
     st.info(
-        "Fase 3: cada original se guarda inmediatamente en Drive antes del OCR. "
-        "Gemini continúa desactivado y no consume tokens."
+        "Fase 4: calidad, QR, preprocesamiento adaptativo y PaddleOCR local en CPU. "
+        "Gemini continúa desactivado y consume cero tokens."
     )
-    setup_tab, upload_tab, queue_tab = st.tabs(["Preparar", "Cargar", "Cola"])
+    setup_tab, upload_tab, queue_tab, ocr_tab = st.tabs(
+        ["Preparar", "Cargar", "Cola", "OCR local"]
+    )
     with setup_tab:
         render_setup()
     with upload_tab:
         render_upload()
     with queue_tab:
         render_queue()
+    with ocr_tab:
+        render_local_ocr()
     st.caption(f"{APP_NAME} · {APP_VERSION}")
 
 
