@@ -1,4 +1,4 @@
-"""Punto de entrada de OCR Web.
+"""Punto de entrada de OCR Web
 
 Fase 1: prueba mínima de despliegue en Streamlit Community Cloud.
 """
