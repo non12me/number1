@@ -10,6 +10,8 @@ from PIL import Image
 
 from utils import (
     hamming_distance_hex,
+    decode_json_from_sheet,
+    encode_json_for_sheet,
     logical_page_labels,
     pdf_page_count,
     perceptual_hash_bytes,
@@ -78,3 +80,10 @@ def test_pdf_page_count_and_logical_labels() -> None:
 def test_rejects_invalid_pdf() -> None:
     with pytest.raises(ValueError, match="dañado o protegido"):
         pdf_page_count(b"%PDF-contenido-invalido")
+
+
+def test_large_json_roundtrip_uses_compression() -> None:
+    value = {"lines": [{"text": f"linea-{index:05d}-" + ("x" * 40)} for index in range(2000)]}
+    encoded = encode_json_for_sheet(value)
+    assert encoded.startswith("GZIP64:")
+    assert decode_json_from_sheet(encoded) == value
