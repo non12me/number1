@@ -1,0 +1,27 @@
+# Credenciales locales o temporales
+.streamlit/secrets.toml
+*.key
+*.pem
+
+# Archivos generados por Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Entornos y herramientas
+.venv/
+venv/
+.env
+.DS_Store
+
+# Documentos y almacenamiento temporal
+tmp/
+temp/
+uploads/
+*.pdf
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.xlsx
+*.csv
