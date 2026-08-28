@@ -6,6 +6,9 @@ maxUploadSize = 20
 showErrorDetails = "none"
 toolbarMode = "minimal"
 
+[browser]
+gatherUsageStats = false
+
 [theme]
 base = "light"
 primaryColor = "#2563EB"
