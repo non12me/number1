@@ -5,22 +5,28 @@ en la computadora.
 
 ## Estado actual
 
-- Versión: 0.1.0
-- Fase: 1 de 10
-- Modo: MOCK
+- Versión: 0.2.0
+- Fase: 2 de 10
+- OAuth: cuenta personal del propietario con acceso offline
+- Alcance Google: `drive.file`
+- Google Drive API: prueba disponible
+- Google Sheets API: prueba disponible
 - Gemini: desactivado
-- Persistencia: se configurará en las fases 2 y 3
-
-## Ejecución
-
-El proyecto está diseñado para ejecutarse en Streamlit Community Cloud con
-Python 3.11. No requiere ejecución local.
 
 ## Seguridad
 
-Nunca se deben guardar credenciales reales en el repositorio. El archivo
-`.streamlit/secrets.toml` está excluido mediante `.gitignore`. En la Fase 2, las
-credenciales reales se guardarán únicamente en el panel Secrets de Streamlit.
+- No se usa una cuenta de servicio para escribir en el Drive personal.
+- Las credenciales reales se guardan únicamente en Streamlit Secrets.
+- El repositorio contiene solo `.streamlit/secrets.toml.example`.
+- La aplicación nunca imprime client ID, client secret, refresh token ni IDs
+  configurados.
+- El alcance `drive.file` limita la aplicación a los archivos que crea o utiliza.
+
+## Archivos incorporados en la Fase 2
+
+- `google_auth.py`: credenciales OAuth y renovación del access token.
+- `google_drive.py`: prueba de Drive y creación idempotente de la hoja base.
+- `google_sheets.py`: prueba de acceso a la hoja configurada.
 
 ## Punto de entrada
 
