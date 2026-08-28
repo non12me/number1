@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import base64
+import gzip
 import hashlib
 import io
+import json
 import re
 import unicodedata
 from pathlib import Path
+from typing import Any
 
 import pymupdf
 from PIL import Image, ImageOps
@@ -16,6 +20,7 @@ from config import (
     ALLOWED_MIME_TYPES,
     MAX_FILE_SIZE_BYTES,
     MAX_PDF_PAGES,
+    SHEET_JSON_PLAIN_LIMIT,
 )
 
 
@@ -87,7 +92,7 @@ def perceptual_hash_bytes(data: bytes, mime_type: str) -> str:
     with Image.open(io.BytesIO(data)) as image:
         image = ImageOps.exif_transpose(image).convert("L")
         image = image.resize((9, 8), Image.Resampling.LANCZOS)
-        pixels = list(image.getdata())
+        pixels = list(image.get_flattened_data())
 
     bits = []
     for row in range(8):
@@ -130,3 +135,22 @@ def logical_page_labels(page_count: int, separate_pages: bool) -> list[str]:
     if separate_pages:
         return [str(page) for page in range(1, page_count + 1)]
     return [f"1-{page_count}"]
+
+
+def encode_json_for_sheet(value: Any) -> str:
+    """Comprime JSON grande para respetar el límite por celda de Sheets."""
+    raw = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    if len(raw) <= SHEET_JSON_PLAIN_LIMIT:
+        return raw
+    compressed = gzip.compress(raw.encode("utf-8"), compresslevel=6)
+    return "GZIP64:" + base64.b64encode(compressed).decode("ascii")
+
+
+def decode_json_from_sheet(value: str) -> Any:
+    """Lee indistintamente JSON normal o el formato comprimido de la app."""
+    if not value:
+        return {}
+    if value.startswith("GZIP64:"):
+        compressed = base64.b64decode(value.removeprefix("GZIP64:"))
+        value = gzip.decompress(compressed).decode("utf-8")
+    return json.loads(value)
