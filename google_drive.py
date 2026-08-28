@@ -8,7 +8,7 @@ from typing import Any
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import Resource, build
-from googleapiclient.http import MediaIoBaseUpload
+from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 from config import (
     DRIVE_CONFIRMED_FOLDER_NAME,
@@ -206,3 +206,20 @@ def upload_original_bytes(
     if progress_callback is not None:
         progress_callback(1.0)
     return str(response["id"])
+
+
+def download_file_to_path(
+    credentials: Credentials,
+    file_id: str,
+    destination: str,
+) -> None:
+    """Descarga una copia temporal del original sin alterar Drive."""
+    if not file_id:
+        raise ValueError("El job no tiene drive_file_id.")
+    service = build_drive_service(credentials)
+    request = service.files().get_media(fileId=file_id)
+    with open(destination, "wb") as output:
+        downloader = MediaIoBaseDownload(output, request, chunksize=1024 * 1024)
+        completed = False
+        while not completed:
+            _, completed = downloader.next_chunk(num_retries=2)
