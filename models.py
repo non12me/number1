@@ -81,3 +81,68 @@ class UploadResult(BaseModel):
     filename: str
     message: str
     jobs_created: int = 0
+
+
+class QualityLevel(StrEnum):
+    BUENA = "BUENA"
+    ACEPTABLE = "ACEPTABLE"
+    DEFICIENTE = "DEFICIENTE"
+    ILEGIBLE = "ILEGIBLE"
+
+
+class QualityReport(BaseModel):
+    """Métricas objetivas calculadas sobre una página original."""
+
+    width: int
+    height: int
+    blur_score: float
+    brightness: float
+    contrast: float
+    rotation_degrees: float
+    perspective_score: float
+    document_area_ratio: float
+    cut_border_score: float
+    level: QualityLevel
+    warnings: list[str] = Field(default_factory=list)
+
+
+class OCRLine(BaseModel):
+    """Una línea reconocida con trazabilidad de página y versión."""
+
+    text: str
+    confidence: float
+    coordinates: list[list[float]]
+    page: int
+    preprocessing_version: str
+
+
+class QRResult(BaseModel):
+    """Resultado QR validado sin suponer valores faltantes."""
+
+    detected: bool = False
+    valid: bool = False
+    raw_text: str = ""
+    fields: dict[str, Any] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    coordinates: list[list[float]] = Field(default_factory=list)
+    source_image: str = "ORIGINAL"
+
+
+class PageOCRResult(BaseModel):
+    page: int
+    quality: QualityReport
+    qr: QRResult
+    lines: list[OCRLine] = Field(default_factory=list)
+    versions_used: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class LocalOCRPayload(BaseModel):
+    """Checkpoint completo de la Fase 4 para un documento lógico."""
+
+    engine_profile: str
+    pages: list[PageOCRResult]
+    line_count: int
+    mean_ocr_confidence: float
+    weakest_quality: QualityLevel
+    warnings: list[str] = Field(default_factory=list)
