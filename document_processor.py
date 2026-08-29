@@ -7,15 +7,18 @@ from pathlib import Path
 
 from google.oauth2.credentials import Credentials
 
+from candidate_extractor import toll_lines_need_recovery
 from google_drive import download_file_to_path
 from local_ocr import run_adaptive_ocr
 from models import (
+    DocumentType,
     JobState,
     LocalOCRPayload,
     PageOCRResult,
     QualityLevel,
     QRResult,
 )
+from parsers import parse_toll
 from preprocessing import (
     iter_document_pages,
     preprocess_version_a,
@@ -54,6 +57,7 @@ def process_document_job(
     page_results: list[PageOCRResult] = []
     document_warnings: list[str] = []
     engine_profile = "NO_CARGADO"
+    document_type = DocumentType(job.get("tipo_documento", DocumentType.PEAJE.value))
 
     with tempfile.TemporaryDirectory(prefix="ocr_job_") as temporary_directory:
         temporary_path = str(Path(temporary_directory) / f"original{suffix}")
@@ -97,6 +101,11 @@ def process_document_job(
                 original,
                 page_number,
                 quality.level,
+                recovery_evaluator=(
+                    toll_lines_need_recovery
+                    if document_type == DocumentType.PEAJE
+                    else None
+                ),
             )
             engine_profile = profile
             if not lines:
@@ -128,6 +137,10 @@ def process_document_job(
     )
     for page in page_results:
         document_warnings.extend(page.warnings)
+    extraction = parse_toll(page_results) if document_type == DocumentType.PEAJE else None
+    if extraction is not None:
+        document_warnings.extend(extraction.warnings)
+        document_warnings.extend(extraction.blocking_validations)
     payload = LocalOCRPayload(
         engine_profile=engine_profile,
         pages=page_results,
@@ -135,7 +148,10 @@ def process_document_job(
         mean_ocr_confidence=round(mean_confidence, 4),
         weakest_quality=weakest,
         warnings=list(dict.fromkeys(document_warnings)),
+        extraction=extraction,
     )
     if weakest == QualityLevel.ILEGIBLE or not all_lines:
+        return payload, JobState.NECESITA_REVISION
+    if extraction is not None and not extraction.valid:
         return payload, JobState.NECESITA_REVISION
     return payload, JobState.EXTRAIDO_LOCAL
