@@ -468,6 +468,56 @@ def render_ocr_result_viewer() -> None:
     fourth.metric("Calidad más débil", payload.get("weakest_quality", ""))
     st.caption(f"Perfil: {payload.get('engine_profile', '')}")
 
+    extraction = payload.get("extraction") or {}
+    if extraction:
+        st.markdown("#### Datos del peaje")
+        extraction_columns = st.columns(3)
+        extraction_columns[0].metric(
+            "Confianza global",
+            f"{float(extraction.get('global_confidence', 0) or 0):.1%}",
+        )
+        extraction_columns[1].metric(
+            "Validación",
+            "VÁLIDO" if extraction.get("valid") else "REVISAR",
+        )
+        extraction_columns[2].metric(
+            "Gemini",
+            "No utilizado",
+        )
+        field_rows = []
+        candidate_rows = []
+        for field_name, field_data in (extraction.get("fields") or {}).items():
+            field_rows.append(
+                {
+                    "campo": field_name,
+                    "valor": field_data.get("value"),
+                    "confianza_final": field_data.get("confidence_final", 0),
+                    "confianza_ocr": field_data.get("confidence_ocr", 0),
+                    "fuente": field_data.get("source", "OCR"),
+                    "advertencias": " | ".join(field_data.get("warnings") or []),
+                    "pagina": field_data.get("page", ""),
+                }
+            )
+            for candidate in field_data.get("candidates") or []:
+                candidate_rows.append(
+                    {
+                        "campo": field_name,
+                        "valor": candidate.get("value"),
+                        "puntuacion": candidate.get("final_score", 0),
+                        "texto_ocr": candidate.get("raw_text", ""),
+                        "etiqueta": candidate.get("nearby_label", ""),
+                        "fuente": candidate.get("source", "OCR"),
+                        "pagina": candidate.get("page", ""),
+                    }
+                )
+        st.dataframe(field_rows, hide_index=True, width="stretch")
+        blocking = extraction.get("blocking_validations") or []
+        if blocking:
+            st.error("Validaciones bloqueantes: " + " | ".join(blocking))
+        if candidate_rows:
+            with st.expander("Ver candidatos alternativos y puntuaciones"):
+                st.dataframe(candidate_rows, hide_index=True, width="stretch")
+
     quality_rows = []
     line_rows = []
     qr_rows = []
@@ -545,7 +595,7 @@ def render_local_ocr() -> None:
 def main() -> None:
     render_header()
     st.info(
-        "Fase 4: calidad, QR, preprocesamiento adaptativo y PaddleOCR local en CPU. "
+        "Fase 5: candidatos, validaciones, confianza y extracción estructurada de peajes. "
         "Gemini continúa desactivado y consume cero tokens."
     )
     setup_tab, upload_tab, queue_tab, ocr_tab = st.tabs(
