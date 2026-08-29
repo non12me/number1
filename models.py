@@ -128,6 +128,61 @@ class QRResult(BaseModel):
     source_image: str = "ORIGINAL"
 
 
+class ValueSource(StrEnum):
+    QR = "QR"
+    OCR = "OCR"
+    REGLA = "REGLA"
+    PLANTILLA = "PLANTILLA"
+    CALCULADO = "CALCULADO"
+    GEMINI = "GEMINI"
+    HUMANO = "HUMANO"
+
+
+class FieldCandidate(BaseModel):
+    """Valor posible con evidencia y puntuación trazable."""
+
+    field: str
+    raw_text: str
+    value: str
+    ocr_confidence: float
+    format_score: float
+    label_score: float
+    position_score: float
+    consistency_score: float
+    final_score: float
+    nearby_label: str = ""
+    coordinates: list[list[float]] = Field(default_factory=list)
+    page: int = 1
+    source: ValueSource = ValueSource.OCR
+    warnings: list[str] = Field(default_factory=list)
+
+
+class FieldResult(BaseModel):
+    """Campo elegido sin perder candidatos alternativos."""
+
+    value: str | None = None
+    confidence_ocr: float = 0.0
+    confidence_rule: float = 0.0
+    confidence_final: float = 0.0
+    source: ValueSource = ValueSource.OCR
+    warnings: list[str] = Field(default_factory=list)
+    coordinates: list[list[float]] = Field(default_factory=list)
+    page: int = 1
+    raw_text: str = ""
+    candidates: list[FieldCandidate] = Field(default_factory=list)
+
+
+class ExtractionResult(BaseModel):
+    """Extracción estructurada y validada de un documento."""
+
+    document_type: DocumentType
+    fields: dict[str, FieldResult] = Field(default_factory=dict)
+    global_confidence: float = 0.0
+    valid: bool = False
+    blocking_validations: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
 class PageOCRResult(BaseModel):
     page: int
     quality: QualityReport
@@ -138,7 +193,7 @@ class PageOCRResult(BaseModel):
 
 
 class LocalOCRPayload(BaseModel):
-    """Checkpoint completo de la Fase 4 para un documento lógico."""
+    """Checkpoint completo del OCR y de la extracción estructurada."""
 
     engine_profile: str
     pages: list[PageOCRResult]
@@ -146,3 +201,4 @@ class LocalOCRPayload(BaseModel):
     mean_ocr_confidence: float
     weakest_quality: QualityLevel
     warnings: list[str] = Field(default_factory=list)
+    extraction: ExtractionResult | None = None
