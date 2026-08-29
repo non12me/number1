@@ -158,6 +158,24 @@ def process_one_pending_job(
                 "message": "El lease cambió antes de guardar el resultado.",
             }
         payload_data = payload.model_dump(mode="json")
+        extraction_confidence = {}
+        if payload.extraction is not None:
+            extraction_confidence = {
+                "global_confidence": payload.extraction.global_confidence,
+                "valid": payload.extraction.valid,
+                "fields": {
+                    name: {
+                        "value": result.value,
+                        "confidence_ocr": result.confidence_ocr,
+                        "confidence_rule": result.confidence_rule,
+                        "confidence_final": result.confidence_final,
+                        "source": result.source,
+                        "warnings": result.warnings,
+                        "coordinates": result.coordinates,
+                    }
+                    for name, result in payload.extraction.fields.items()
+                },
+            }
         update_queue_jobs(
             credentials,
             spreadsheet_id,
@@ -171,6 +189,7 @@ def process_one_pending_job(
                             "mean_ocr_confidence": payload.mean_ocr_confidence,
                             "weakest_quality": payload.weakest_quality,
                             "engine_profile": payload.engine_profile,
+                            "extraction": extraction_confidence,
                         },
                         ensure_ascii=False,
                     ),
@@ -201,6 +220,11 @@ def process_one_pending_job(
                                 "estado": final_state.value,
                                 "lineas": payload.line_count,
                                 "perfil": payload.engine_profile,
+                                "confianza_global": (
+                                    payload.extraction.global_confidence
+                                    if payload.extraction is not None
+                                    else None
+                                ),
                             },
                             ensure_ascii=False,
                         ),
@@ -219,6 +243,11 @@ def process_one_pending_job(
             "mean_confidence": payload.mean_ocr_confidence,
             "quality": payload.weakest_quality,
             "engine_profile": payload.engine_profile,
+            "global_confidence": (
+                payload.extraction.global_confidence
+                if payload.extraction is not None
+                else None
+            ),
         }
     except Exception as exc:  # noqa: BLE001
         if job is not None and _still_owned(
