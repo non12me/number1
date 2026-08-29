@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -323,6 +324,7 @@ def run_adaptive_ocr(
     original: np.ndarray,
     page: int,
     quality_level: QualityLevel,
+    recovery_evaluator: Callable[[list[OCRLine]], bool] | None = None,
 ) -> tuple[str, list[OCRLine], list[str], np.ndarray]:
     """Ejecuta A y solo añade B/C cuando la evidencia lo requiere."""
     bundle = get_ocr_engine()
@@ -332,13 +334,19 @@ def run_adaptive_ocr(
     versions = ["A"]
     combined = combine_ocr_lines(groups)
 
-    if quality_level != QualityLevel.BUENA or _weak(combined):
+    needs_recovery = _weak(combined) or (
+        recovery_evaluator(combined) if recovery_evaluator is not None else False
+    )
+    if quality_level != QualityLevel.BUENA or needs_recovery:
         version_b = preprocess_version_b(version_a)
         groups.append(_ocr_version(bundle, version_b, page, "B"))
         versions.append("B")
         combined = combine_ocr_lines(groups)
 
-    if quality_level in {QualityLevel.DEFICIENTE, QualityLevel.ILEGIBLE} or _weak(combined):
+    needs_recovery = _weak(combined) or (
+        recovery_evaluator(combined) if recovery_evaluator is not None else False
+    )
+    if quality_level in {QualityLevel.DEFICIENTE, QualityLevel.ILEGIBLE} or needs_recovery:
         version_c = preprocess_version_c(version_a)
         groups.append(_ocr_version(bundle, version_c, page, "C"))
         versions.append("C")
