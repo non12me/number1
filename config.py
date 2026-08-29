@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 APP_NAME = "OCR Documental Web"
-APP_VERSION = "0.4.0"
-PROJECT_PHASE = "Fase 4"
+APP_VERSION = "0.5.0"
+PROJECT_PHASE = "Fase 5"
 MOCK_MODE = False
 GEMINI_ENABLED = False
 
@@ -37,6 +37,22 @@ OCR_LOCK_MINUTES = 30
 OCR_LONG_RECEIPT_RATIO = 2.5
 OCR_SEGMENT_OVERLAP = 160
 SHEET_JSON_PLAIN_LIMIT = 45_000
+
+CANDIDATE_WEIGHTS = {
+    "ocr": 0.35,
+    "format": 0.25,
+    "label": 0.20,
+    "position": 0.10,
+    "consistency": 0.10,
+}
+CONFIDENCE_RELIABLE = 0.90
+CONFIDENCE_REVIEW = 0.75
+CANDIDATE_CONFLICT_DELTA = 0.05
+MONETARY_TOLERANCE = "0.02"
+REASONABLE_MIN_YEAR = 2000
+REASONABLE_MAX_FUTURE_YEARS = 1
+PEAJE_REQUIRED_FIELDS = ("lugar", "fecha", "placa", "monto_total")
+PERUVIAN_PLATE_MASKS = ("LLLDDD", "LDLDDD", "LLDDDD")
 
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".pdf"}
 ALLOWED_MIME_TYPES = {
