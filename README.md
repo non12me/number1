@@ -5,9 +5,9 @@ en la computadora.
 
 Estado actual
 
-Versión: 0.5.0
+Versión: 0.7.0
 
-Fase: 5 de 10
+Fase: 7 de 10
 
 OAuth: cuenta personal del propietario con acceso offline
 
@@ -38,6 +38,22 @@ Worker: lotes secuenciales de 1, 5 o 10 con checkpoint por documento
 
 Peajes: candidatos múltiples, normalización, validaciones y confianza por campo
 
+Boletas y facturas: RUC emisor, razón social, serie, fecha, cliente e importes
+
+Detalle: ítems JSON estructurados y concepto resumido sin Gemini
+
+Conocimiento: diccionarios y plantillas activas desde Google Sheets
+
+Revisión: original y preprocesamiento A lado a lado, texto OCR y campos editables
+
+Correcciones: fuente HUMANO y registro trazable en CORRECCIONES
+
+Confirmación: idempotente por job_id, con lock persistente y relectura de estado
+
+Drive: renombra y mueve el mismo archivo a OCR_CONFIRMADOS, sin copiarlo
+
+Rechazo: conserva el original en OCR_ENTRADA y registra el motivo
+
 Confianza global: limitada por lugar, fecha, placa y monto_total
 
 Importes: Decimal, consistencia subtotal + IGV = total y cálculo trazable
@@ -57,21 +73,19 @@ configurados.
 
 El alcance drive.file limita la aplicación a los archivos que crea o utiliza.
 
-Archivos incorporados o ampliados en la Fase 5
+Archivos incorporados o ampliados en la Fase 7
 
-candidate_extractor.py: conserva todos los candidatos y su evidencia.
+review.py: campos editables, normalización y validación humana determinista.
 
-validators.py: fechas, horas, placas, serie, DNI, RUC e importes.
+confirmation.py: borrador, rechazo, lock, upsert y confirmación idempotente.
 
-confidence.py: pesos configurables, conflictos y confianza global mínima.
+google_drive.py: vista previa en memoria y movimiento del mismo archivo.
 
-parsers.py: selección conservadora y extracción completa de peajes.
+google_sheets.py: upsert de resultados mediante job_id estable.
 
-document_processor.py: activa recuperación A/B/C cuando faltan campos.
+app.py: pestaña Revisión responsive con original, procesado, confianza y acciones.
 
-app.py: muestra datos, fuente, confianza, alertas y candidatos alternativos.
-
-tests/: 34 pruebas sin credenciales ni documentos reales.
+tests/: 51 pruebas sin credenciales ni documentos reales.
 
 Flujo de persistencia
 
@@ -91,7 +105,7 @@ Si Streamlit se reinicia entre los pasos 5 y 6, el botón de recuperación busca
 el archivo mediante su SHA-256 privado y completa el checkpoint sin volver a
 subirlo.
 
-Flujo OCR y peajes de la Fase 5
+Flujo OCR y documentos de la Fase 6
 
 El worker reclama un job PENDIENTE y lo marca PROCESANDO.
 
@@ -113,11 +127,39 @@ Elimina la copia temporal y deja el original intacto en Drive.
 
 Marca EXTRAIDO_LOCAL, NECESITA_REVISION o ERROR.
 
+Para boletas y facturas se valida el RUC peruano, se separa el documento del
+cliente, se reconstruye la sección de detalle y se aplica una relación
+RUC–razón social solo si fue registrada como conocimiento activo. Cuando una
+plantilla coincide y falta un campo, se ejecuta PaddleOCR únicamente en la
+región configurada antes de solicitar revisión.
+
+Flujo de revisión y confirmación de la Fase 7
+
+La pestaña Revisión relee únicamente jobs con resultado estructurado pendiente.
+
+El usuario compara el original, el preprocesamiento y el texto OCR.
+
+Cada campo muestra confianza, fuente y color verde, amarillo o rojo.
+
+Guardar correcciones actualiza el checkpoint y registra diferencias sin mover Drive.
+
+Confirmar y mover vuelve a validar RUC, DNI, placa, fecha e importes.
+
+El job pasa a CONFIRMANDO con propietario y vencimiento de lock.
+
+El resultado se inserta o actualiza por job_id en su pestaña final.
+
+Se renombra y mueve el mismo drive_file_id a OCR_CONFIRMADOS.
+
+El checkpoint termina en CONFIRMADO; repetir la acción no crea otra fila.
+
+Si un PDF comparte varios jobs, se mueve solo al confirmar el último.
+
 Limitaciones deliberadas de esta fase
 
-Boletas y facturas se incorporan en Fase 6.
+Las correcciones quedan registradas, pero no crean reglas automáticamente sin aprobación.
 
-La edición humana y confirmación se incorporan en Fase 7.
+Gemini opcional, sus límites y el contador de tokens se incorporan en Fase 8.
 
 La primera ejecución debe descargar los pesos gratuitos del modelo.
 
