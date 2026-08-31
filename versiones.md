@@ -1,5 +1,67 @@
 Registro de versiones
 
+0.7.0 — Fase 7 — 2026-08-31
+
+Nueva pestaña Revisión con diseño adaptable a computadora y celular.
+
+Vista del original y comparación opcional con preprocesamiento A.
+
+Texto OCR, confianza, fuente y semáforo por campo.
+
+Edición humana para peajes, boletas y facturas con normalización determinista.
+
+Validación bloqueante de RUC, DNI, placa, fecha, serie, JSON e importes.
+
+Guardado de borrador sin confirmar ni mover el original.
+
+Registro único de diferencias en CORRECCIONES con fuente HUMANO.
+
+Rechazo con motivo y permanencia del original en OCR_ENTRADA.
+
+Estado CONFIRMANDO, lock persistente, verificación del propietario y recuperación por vencimiento.
+
+Upsert por job_id en PEAJES, BOLETAS o FACTURAS.
+
+Renombrado y movimiento del mismo archivo a OCR_CONFIRMADOS, sin copiar ni borrar.
+
+PDF compartido movido únicamente después de confirmar todos sus jobs lógicos.
+
+Reintento seguro después de una interrupción sin duplicar la fila final.
+
+Gemini permanece desactivado y utiliza cero tokens.
+
+51 pruebas automáticas superadas; seis pestañas verificadas sin excepciones.
+
+0.6.0 — Fase 6 — 2026-08-29
+
+Candidatos de RUC emisor con validación de dígito verificador peruano.
+
+Separación conservadora entre RUC emisor y documento del cliente.
+
+Razón social buscada en encabezado, cerca del RUC y mediante diccionario.
+
+Relación persistente RUC–razón social verificada.
+
+Serie y número con conservación de ceros a la izquierda.
+
+Sección de detalle convertida a items_json estructurado.
+
+concepto_resumen generado localmente sin enviar el documento a Gemini.
+
+Parser común validado para boletas y facturas.
+
+Lectura activa de DICCIONARIOS y PLANTILLAS desde Google Sheets.
+
+Palabras identificadoras y regiones normalizadas por proveedor.
+
+PaddleOCR sobre recortes esperados solo cuando falta un campo.
+
+Nueva pestaña web Conocimiento para inspeccionar reglas persistentes.
+
+Gemini permanece desactivado y utiliza cero tokens.
+
+41 pruebas automáticas superadas.
+
 0.5.0 — Fase 5 — 2026-08-29
 
 Extracción mediante candidatos para los once campos de peaje.
@@ -125,4 +187,4 @@ Gemini desactivado.
 
 Configuración inicial de seguridad.
 
-Preparación para despliegue con Python 3.11.
+Preparación para despliegue con Python 3.11
