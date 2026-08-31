@@ -1,10 +1,11 @@
+
 """Configuración pública y no sensible del proyecto."""
 
 from __future__ import annotations
 
 APP_NAME = "OCR Documental Web"
-APP_VERSION = "0.5.0"
-PROJECT_PHASE = "Fase 5"
+APP_VERSION = "0.7.0"
+PROJECT_PHASE = "Fase 7"
 MOCK_MODE = False
 GEMINI_ENABLED = False
 
@@ -52,7 +53,17 @@ MONETARY_TOLERANCE = "0.02"
 REASONABLE_MIN_YEAR = 2000
 REASONABLE_MAX_FUTURE_YEARS = 1
 PEAJE_REQUIRED_FIELDS = ("lugar", "fecha", "placa", "monto_total")
+VOUCHER_REQUIRED_FIELDS = (
+    "ruc_emisor",
+    "razon_social",
+    "serie_numero",
+    "fecha",
+    "monto_total",
+)
 PERUVIAN_PLATE_MASKS = ("LLLDDD", "LDLDDD", "LLDDDD")
+DICTIONARY_MATCH_THRESHOLD = 0.90
+MAX_ITEMS_PER_DOCUMENT = 50
+CONCEPT_SUMMARY_MAX_LENGTH = 180
 
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".pdf"}
 ALLOWED_MIME_TYPES = {
