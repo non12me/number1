@@ -287,3 +287,51 @@ def update_queue_jobs(
         body={"valueInputOption": "RAW", "data": data},
     ).execute()
     return len(data)
+
+
+def upsert_record(
+    credentials: Credentials,
+    spreadsheet_id: str,
+    sheet_name: str,
+    key_column: str,
+    key_value: str,
+    record: dict[str, Any],
+) -> str:
+    """Inserta o reemplaza una fila completa usando una clave estable."""
+    if sheet_name not in SHEET_HEADERS:
+        raise ValueError("Pestaña no permitida.")
+    headers = SHEET_HEADERS[sheet_name]
+    if key_column not in headers or not key_value:
+        raise ValueError("La clave del upsert no es válida.")
+    service = build_sheets_service(credentials)
+    values = service.spreadsheets().values().get(
+        spreadsheetId=spreadsheet_id,
+        range=f"{_quote_sheet(sheet_name)}!A:{_column_letter(len(headers))}",
+    ).execute().get("values", [])
+    key_index = headers.index(key_column)
+    matching_row = None
+    for sheet_row, row in enumerate(values[1:], start=2):
+        current = list(row) + [""] * (len(headers) - len(row))
+        if str(current[key_index]) == str(key_value):
+            matching_row = sheet_row
+            break
+    row_values = [[record.get(header, "") for header in headers]]
+    if matching_row is None:
+        service.spreadsheets().values().append(
+            spreadsheetId=spreadsheet_id,
+            range=f"{_quote_sheet(sheet_name)}!A2",
+            valueInputOption="RAW",
+            insertDataOption="INSERT_ROWS",
+            body={"values": row_values},
+        ).execute()
+        return "INSERTED"
+    service.spreadsheets().values().update(
+        spreadsheetId=spreadsheet_id,
+        range=(
+            f"{_quote_sheet(sheet_name)}!A{matching_row}:"
+            f"{_column_letter(len(headers))}{matching_row}"
+        ),
+        valueInputOption="RAW",
+        body={"values": row_values},
+    ).execute()
+    return "UPDATED"
