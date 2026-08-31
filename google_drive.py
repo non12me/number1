@@ -223,3 +223,56 @@ def download_file_to_path(
         completed = False
         while not completed:
             _, completed = downloader.next_chunk(num_retries=2)
+
+
+def download_file_bytes(
+    credentials: Credentials,
+    file_id: str,
+) -> bytes:
+    """Descarga un original en memoria para la vista previa de revisión."""
+    if not file_id:
+        raise ValueError("El job no tiene drive_file_id.")
+    request = build_drive_service(credentials).files().get_media(fileId=file_id)
+    output = io.BytesIO()
+    downloader = MediaIoBaseDownload(output, request, chunksize=1024 * 1024)
+    completed = False
+    while not completed:
+        _, completed = downloader.next_chunk(num_retries=2)
+    return output.getvalue()
+
+
+def move_file_to_folder(
+    credentials: Credentials,
+    file_id: str,
+    destination_folder_id: str,
+    new_name: str,
+) -> dict[str, str]:
+    """Mueve el mismo archivo, sin copiarlo, y permite reintentos seguros."""
+    if not file_id or not destination_folder_id:
+        raise ValueError("Falta el archivo o la carpeta de confirmados.")
+    service = build_drive_service(credentials)
+    current = service.files().get(
+        fileId=file_id,
+        fields="id,name,parents,trashed,appProperties",
+    ).execute()
+    if current.get("trashed"):
+        raise ValueError("El original está en la papelera.")
+    parents = [str(parent) for parent in current.get("parents", [])]
+    app_properties = dict(current.get("appProperties") or {})
+    app_properties["ocr_status"] = "confirmed"
+    request_arguments: dict[str, Any] = {
+        "fileId": file_id,
+        "body": {"name": new_name, "appProperties": app_properties},
+        "fields": "id,name,parents",
+    }
+    if destination_folder_id not in parents:
+        request_arguments["addParents"] = destination_folder_id
+        removable = [parent for parent in parents if parent != destination_folder_id]
+        if removable:
+            request_arguments["removeParents"] = ",".join(removable)
+    updated = service.files().update(**request_arguments).execute()
+    return {
+        "id": str(updated.get("id", file_id)),
+        "name": str(updated.get("name", new_name)),
+        "parents": ",".join(str(item) for item in updated.get("parents", [])),
+    }
