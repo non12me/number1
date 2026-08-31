@@ -1,10 +1,10 @@
-"""Aplicación web OCR: infraestructura persistente y carga segura."""
+"""Aplicación final OCR: captura, extracción, revisión y reportes."""
 
 from __future__ import annotations
 
 import json
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -17,12 +17,25 @@ from config import (
     DRIVE_INPUT_FOLDER_NAME,
     MAX_FILES_PER_UPLOAD,
     MAX_FILE_SIZE_MB,
+    GEMINI_ENABLED,
+    GEMINI_MAX_OUTPUT_TOKENS,
+    GEMINI_MAX_REQUESTS_PER_DAY,
+    GEMINI_MAX_REQUESTS_PER_SESSION,
+    GEMINI_MODEL,
     PROJECT_PHASE,
+    REPORT_MAX_ROWS,
 )
 from confirmation import confirm_review, reject_review, save_review_draft, suggested_filename
+from gemini_fallback import recover_job_with_gemini
 from google_auth import get_google_credentials
 from google_drive import download_file_bytes, ensure_storage_folders, validate_folder
-from google_sheets import ensure_workbook_structure, read_records
+from google_sheets import (
+    configuration_map,
+    ensure_workbook_structure,
+    read_multiple_records,
+    read_records,
+    upsert_record,
+)
 from local_ocr import OCRModelLoadError, get_ocr_engine
 from models import DocumentType
 from ocr_worker import (
@@ -31,6 +44,15 @@ from ocr_worker import (
     retry_local_ocr_errors,
 )
 from queue_manager import enqueue_upload, recover_upload_checkpoints
+from reports import (
+    build_dashboard_metrics,
+    filter_rows,
+    make_csv_zip,
+    make_excel_report,
+    make_pdf_summary,
+    monthly_expenses,
+    type_summary,
+)
 from review import FIELD_LABELS, build_review_previews, field_names, values_from_payload
 from upload_manager import prepare_upload
 from utils import decode_json_from_sheet, pdf_page_count
@@ -41,6 +63,20 @@ st.set_page_config(
     page_icon="📄",
     layout="wide",
     initial_sidebar_state="collapsed",
+)
+
+st.markdown(
+    """
+    <style>
+    .block-container {max-width: 1500px; padding-top: 1.25rem; padding-bottom: 2rem;}
+    [data-testid="stMetric"] {background: #f8fafc; border: 1px solid #e2e8f0;
+        border-radius: 12px; padding: .75rem 1rem;}
+    [data-testid="stTabs"] button {font-weight: 650;}
+    .final-banner {padding: .85rem 1rem; border-radius: 12px; color: #164e63;
+        background: linear-gradient(90deg,#ecfeff,#f8fafc); border: 1px solid #a5f3fc;}
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
 
@@ -75,14 +111,117 @@ def infrastructure_ready() -> bool:
     return all(get_secret(name) for name in required)
 
 
+def _bool_value(value: Any, default: bool = False) -> bool:
+    if value is None or str(value).strip() == "":
+        return default
+    return str(value).strip().casefold() in {"1", "true", "si", "sí", "yes", "activo"}
+
+
+def _int_value(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
+
+
+def runtime_configuration(credentials: Any | None = None) -> dict[str, Any]:
+    """Carga opciones públicas; una caída de Sheets conserva valores seguros."""
+    defaults: dict[str, Any] = {
+        "gemini_enabled": GEMINI_ENABLED,
+        "gemini_emergency_stop": False,
+        "gemini_model": GEMINI_MODEL,
+        "gemini_max_requests_day": GEMINI_MAX_REQUESTS_PER_DAY,
+        "gemini_max_output_tokens": GEMINI_MAX_OUTPUT_TOKENS,
+    }
+    if not infrastructure_ready():
+        return defaults
+    try:
+        records = read_records(
+            credentials or get_credentials(), get_secret("GOOGLE_SHEET_ID"), "CONFIGURACION"
+        )
+    except Exception:  # noqa: BLE001
+        return defaults
+    values = configuration_map(records)
+    defaults.update(
+        {
+            "gemini_enabled": _bool_value(values.get("gemini_enabled"), GEMINI_ENABLED),
+            "gemini_emergency_stop": _bool_value(values.get("gemini_emergency_stop")),
+            "gemini_model": values.get("gemini_model") or GEMINI_MODEL,
+            "gemini_max_requests_day": _int_value(
+                values.get("gemini_max_requests_day"), GEMINI_MAX_REQUESTS_PER_DAY, 0, 500
+            ),
+            "gemini_max_output_tokens": _int_value(
+                values.get("gemini_max_output_tokens"), GEMINI_MAX_OUTPUT_TOKENS, 32, 512
+            ),
+        }
+    )
+    return defaults
+
+
+def _final_data() -> dict[str, list[dict[str, str]]]:
+    return read_multiple_records(
+        get_credentials(),
+        get_secret("GOOGLE_SHEET_ID"),
+        ["OCR_COLA", "PEAJES", "BOLETAS", "FACTURAS", "LOGS"],
+    )
+
+
 def render_header() -> None:
     st.title("📄 OCR documental")
-    st.caption("Peajes, boletas y facturas · Persistencia en Drive y Sheets")
+    st.caption("Peajes, boletas y facturas · Drive + Sheets · revisión humana")
     first, second, third, fourth = st.columns(4)
     first.metric("Versión", APP_VERSION)
     second.metric("Fase", PROJECT_PHASE)
     third.metric("Carga máxima", f"{MAX_FILES_PER_UPLOAD} archivos")
-    fourth.metric("OCR", "CPU local")
+    fourth.metric("OCR principal", "CPU local")
+    st.markdown(
+        "<div class='final-banner'>Versión final operativa: el OCR local es el flujo principal; "
+        "Gemini es manual, limitado y permanece apagado inicialmente.</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_dashboard() -> None:
+    st.subheader("Panel general")
+    if not infrastructure_ready():
+        st.info(
+            "La aplicación final está instalada. Completa la configuración para mostrar "
+            "los indicadores de tus documentos."
+        )
+        return
+    try:
+        data = _final_data()
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"No se pudo cargar el panel: {type(exc).__name__}.")
+        return
+    metrics = build_dashboard_metrics(data)
+    first, second, third, fourth, fifth = st.columns(5)
+    first.metric("Jobs", metrics["jobs_total"])
+    second.metric("Por revisar", metrics["revision"])
+    third.metric("Confirmados", metrics["confirmados"])
+    fourth.metric("Errores", metrics["errores"])
+    fifth.metric("Total PEN", f"S/ {metrics['total_pen']:.2f}")
+
+    left, right = st.columns(2, gap="large")
+    with left:
+        st.markdown("#### Documentos confirmados")
+        st.dataframe(type_summary(data), hide_index=True, width="stretch")
+    with right:
+        st.markdown("#### Uso controlado de Gemini")
+        gemini_rows = [
+            {"indicador": "Solicitudes", "valor": metrics["gemini_requests"]},
+            {"indicador": "Tokens de entrada", "valor": metrics["gemini_input_tokens"]},
+            {"indicador": "Tokens de salida", "valor": metrics["gemini_output_tokens"]},
+        ]
+        st.dataframe(gemini_rows, hide_index=True, width="stretch")
+
+    monthly = monthly_expenses(data)
+    if monthly:
+        st.markdown("#### Gastos mensuales confirmados en PEN")
+        st.bar_chart(monthly, x="mes", y="total_pen")
+    else:
+        st.caption("El gráfico aparecerá cuando existan documentos confirmados con fecha y total.")
 
 
 def render_setup() -> None:
@@ -98,14 +237,14 @@ def render_setup() -> None:
     )
 
     if not oauth_ready or not sheet_id:
-        st.error("Falta completar la Fase 2 en Streamlit Secrets.")
+        st.error("Faltan credenciales o el ID de Google Sheets en Streamlit Secrets.")
         return
 
     st.info(
         "Este botón crea o recupera OCR_ENTRADA y OCR_CONFIRMADOS, y prepara "
         "las nueve pestañas de OCR_DOCUMENTAL_DB. Puede pulsarse nuevamente sin duplicarlas."
     )
-    if st.button("Crear o verificar estructura de la Fase 3", type="primary", width="stretch"):
+    if st.button("Crear o verificar estructura final", type="primary", width="stretch"):
         try:
             with st.spinner("Preparando Drive y Google Sheets..."):
                 credentials = get_credentials()
@@ -487,7 +626,7 @@ def render_ocr_result_viewer() -> None:
         )
         extraction_columns[2].metric(
             "Gemini",
-            "No utilizado",
+            "Utilizado" if selected.get("gemini_usado", "").upper() == "TRUE" else "No utilizado",
         )
         field_rows = []
         candidate_rows = []
@@ -632,8 +771,8 @@ def render_knowledge() -> None:
     first.metric("Diccionarios activos", len(active_dictionaries))
     second.metric("Plantillas activas", len(active_templates))
     st.info(
-        "Las correcciones no entrenan una IA automáticamente. En las siguientes fases podrán "
-        "convertirse en variantes, relaciones RUC–proveedor o regiones reutilizables."
+        "Las correcciones no entrenan una IA automáticamente. Puedes convertirlas manualmente "
+        "en variantes, relaciones RUC–proveedor o regiones reutilizables."
     )
     with st.expander("Formato admitido para regiones de plantilla"):
         st.code("0.10,0.05,0.90,0.25", language="text")
@@ -650,6 +789,171 @@ def render_knowledge() -> None:
         st.dataframe(templates, hide_index=True, width="stretch")
     else:
         st.caption("Todavía no existen plantillas. El OCR local general seguirá funcionando.")
+
+
+def _limited_export_data(
+    data: dict[str, list[dict[str, str]]],
+) -> dict[str, list[dict[str, str]]]:
+    return {name: rows[-REPORT_MAX_ROWS:] for name, rows in data.items()}
+
+
+def render_results() -> None:
+    st.subheader("Resultados confirmados y exportaciones")
+    if not infrastructure_ready():
+        st.warning("Completa la infraestructura antes de consultar resultados.")
+        return
+    try:
+        data = _final_data()
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"No se pudieron leer los resultados: {type(exc).__name__}.")
+        return
+
+    document_type = st.selectbox(
+        "Tipo de resultado",
+        options=["TODOS", "PEAJES", "BOLETAS", "FACTURAS"],
+        key="result_type",
+    )
+    filter_column, from_column, to_column = st.columns([2, 1, 1])
+    query = filter_column.text_input(
+        "Buscar", placeholder="RUC, placa, proveedor, serie o archivo"
+    )
+    date_from = from_column.date_input("Desde", value=None, key="result_date_from")
+    date_to = to_column.date_input("Hasta", value=None, key="result_date_to")
+    selected_sheets = (
+        ["PEAJES", "BOLETAS", "FACTURAS"]
+        if document_type == "TODOS"
+        else [document_type]
+    )
+    visible: list[dict[str, str]] = []
+    for sheet in selected_sheets:
+        for row in data.get(sheet, []):
+            visible.append({"tipo": sheet, **row})
+    visible = filter_rows(
+        visible,
+        query=query,
+        date_from=date_from.isoformat() if isinstance(date_from, date) else "",
+        date_to=date_to.isoformat() if isinstance(date_to, date) else "",
+    )
+    st.metric("Registros encontrados", len(visible))
+    if visible:
+        st.dataframe(visible[-REPORT_MAX_ROWS:], hide_index=True, width="stretch")
+    else:
+        st.info("No hay resultados confirmados con esos filtros.")
+
+    export_data = _limited_export_data(data)
+    with st.expander("Descargar respaldo o reporte", expanded=True):
+        st.caption(
+            f"Cada exportación incluye como máximo {REPORT_MAX_ROWS} filas recientes por pestaña."
+        )
+        try:
+            excel = make_excel_report(export_data)
+            pdf = make_pdf_summary(export_data)
+            csv_zip = make_csv_zip(export_data)
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"No se pudieron generar las exportaciones: {type(exc).__name__}.")
+            return
+        first, second, third = st.columns(3)
+        first.download_button(
+            "Descargar Excel",
+            data=excel,
+            file_name=f"ocr_documental_{date.today().isoformat()}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            width="stretch",
+        )
+        second.download_button(
+            "Descargar resumen PDF",
+            data=pdf,
+            file_name=f"resumen_ocr_{date.today().isoformat()}.pdf",
+            mime="application/pdf",
+            width="stretch",
+        )
+        third.download_button(
+            "Descargar CSV (ZIP)",
+            data=csv_zip,
+            file_name=f"respaldo_ocr_{date.today().isoformat()}.zip",
+            mime="application/zip",
+            width="stretch",
+        )
+
+
+def _save_config_value(
+    credentials: Any,
+    key: str,
+    value: Any,
+    value_type: str,
+    description: str,
+) -> None:
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    upsert_record(
+        credentials,
+        get_secret("GOOGLE_SHEET_ID"),
+        "CONFIGURACION",
+        "clave",
+        key,
+        {
+            "clave": key,
+            "valor": str(value).lower() if isinstance(value, bool) else str(value),
+            "tipo": value_type,
+            "descripcion": description,
+            "updated_at": now,
+            "updated_by": get_secret("APP_ADMIN_EMAIL") or "ADMIN_NO_CONFIGURADO",
+        },
+    )
+
+
+def render_configuration() -> None:
+    st.subheader("Configuración y diagnóstico")
+    render_setup()
+    st.divider()
+    if not infrastructure_ready():
+        return
+    credentials = get_credentials()
+    config = runtime_configuration(credentials)
+    api_ready = bool(get_secret("GEMINI_API_KEY"))
+    st.markdown("#### Gemini opcional")
+    st.caption(
+        "Permanece apagado por defecto. Solo se ejecuta al pulsar el botón en Revisión y "
+        "solo recibe líneas OCR relacionadas con los campos seleccionados; nunca la imagen."
+    )
+    with st.form("gemini_configuration"):
+        enabled = st.checkbox("Permitir solicitudes manuales", value=bool(config["gemini_enabled"]))
+        emergency_stop = st.checkbox(
+            "Bloqueo de emergencia", value=bool(config["gemini_emergency_stop"])
+        )
+        model = st.text_input("Modelo", value=str(config["gemini_model"]), disabled=True)
+        daily_limit = st.number_input(
+            "Solicitudes máximas por día", min_value=0, max_value=500,
+            value=int(config["gemini_max_requests_day"]), step=1,
+        )
+        output_tokens = st.number_input(
+            "Tokens máximos de salida", min_value=32, max_value=512,
+            value=int(config["gemini_max_output_tokens"]), step=32,
+        )
+        save = st.form_submit_button("Guardar configuración", type="primary", width="stretch")
+    if save:
+        for key, value, value_type, description in (
+            ("gemini_enabled", enabled, "bool", "Interruptor de Gemini"),
+            ("gemini_emergency_stop", emergency_stop, "bool", "Bloqueo inmediato de Gemini"),
+            ("gemini_model", model, "text", "Modelo estable de bajo consumo"),
+            ("gemini_max_requests_day", int(daily_limit), "int", "Límite diario"),
+            ("gemini_max_output_tokens", int(output_tokens), "int", "Salida máxima"),
+        ):
+            _save_config_value(credentials, key, value, value_type, description)
+        st.success("Configuración guardada en Google Sheets.")
+    status_columns = st.columns(3)
+    status_columns[0].metric("API key", "Configurada" if api_ready else "No configurada")
+    status_columns[1].metric("Solicitudes", "Permitidas" if enabled else "Apagadas")
+    status_columns[2].metric("Emergencia", "BLOQUEADA" if emergency_stop else "Normal")
+
+    with st.expander("Diagnóstico sin mostrar secretos"):
+        diagnostics = [
+            {"componente": "OAuth Google", "estado": "OK" if get_secret("GOOGLE_REFRESH_TOKEN") else "FALTA"},
+            {"componente": "Google Sheets", "estado": "OK" if get_secret("GOOGLE_SHEET_ID") else "FALTA"},
+            {"componente": "Drive entrada", "estado": "OK" if get_secret("DRIVE_INPUT_FOLDER_ID") else "FALTA"},
+            {"componente": "Drive confirmados", "estado": "OK" if get_secret("DRIVE_CONFIRMED_FOLDER_ID") else "FALTA"},
+            {"componente": "Gemini opcional", "estado": "OK" if api_ready else "SIN CLAVE"},
+        ]
+        st.dataframe(diagnostics, hide_index=True, width="stretch")
 
 
 def _reviewable_records() -> list[dict[str, str]]:
@@ -751,7 +1055,10 @@ def render_review() -> None:
     first, second, third = st.columns(3)
     first.metric("Estado", record.get("estado", ""))
     second.metric("Confianza global", f"{confidence:.1%}")
-    third.metric("Gemini", "No utilizado")
+    third.metric(
+        "Gemini",
+        "Utilizado" if record.get("gemini_usado", "").upper() == "TRUE" else "No utilizado",
+    )
     blocking = extraction.get("blocking_validations") or []
     if blocking:
         st.warning("Revisa: " + " | ".join(blocking))
@@ -845,6 +1152,61 @@ def render_review() -> None:
                 else:
                     st.warning(result.get("message", result.get("status", "No completado")))
 
+    with st.expander("Recuperar campos con Gemini (opcional)"):
+        config = runtime_configuration()
+        enabled = bool(config["gemini_enabled"]) and not bool(config["gemini_emergency_stop"])
+        api_key = get_secret("GEMINI_API_KEY")
+        if not enabled:
+            st.info("Gemini está apagado. Puedes habilitar solicitudes manuales en Configuración.")
+        elif not api_key:
+            st.warning("Falta GEMINI_API_KEY en Streamlit Secrets.")
+        else:
+            field_metadata = extraction.get("fields") or {}
+            available_fields = list(field_names(record.get("tipo_documento", "")))
+            suggested_fields = [
+                name
+                for name in available_fields
+                if not str((field_metadata.get(name) or {}).get("value") or "").strip()
+                or float((field_metadata.get(name) or {}).get("confidence_final", 0) or 0) < 0.75
+            ]
+            selected_fields = st.multiselect(
+                "Campos ausentes o dudosos",
+                options=available_fields,
+                default=suggested_fields,
+                format_func=lambda name: FIELD_LABELS.get(name, name),
+                key=f"gemini_fields_{record['job_id']}",
+            )
+            session_requests = int(st.session_state.get("gemini_session_requests", 0))
+            st.caption(
+                f"Sesión: {session_requests}/{GEMINI_MAX_REQUESTS_PER_SESSION}. "
+                "La propuesta siempre queda pendiente de revisión humana."
+            )
+            disabled = not selected_fields or session_requests >= GEMINI_MAX_REQUESTS_PER_SESSION
+            if st.button(
+                "Solicitar propuesta de campos",
+                disabled=disabled,
+                key=f"gemini_request_{record['job_id']}",
+                width="stretch",
+            ):
+                with st.spinner("Consultando solo las líneas OCR relevantes..."):
+                    result = recover_job_with_gemini(
+                        credentials=get_credentials(),
+                        spreadsheet_id=get_secret("GOOGLE_SHEET_ID"),
+                        job_id=record["job_id"],
+                        api_key=api_key,
+                        model=str(config["gemini_model"]),
+                        requested_fields=selected_fields,
+                        user_email=get_secret("APP_ADMIN_EMAIL") or "ADMIN_NO_CONFIGURADO",
+                        daily_limit=int(config["gemini_max_requests_day"]),
+                        max_output_tokens=int(config["gemini_max_output_tokens"]),
+                    )
+                if result.get("status") == "PROPUESTO":
+                    st.session_state["gemini_session_requests"] = session_requests + 1
+                    st.session_state["review_flash"] = result["message"]
+                    st.rerun()
+                else:
+                    st.warning(result.get("message", "Gemini no produjo una propuesta."))
+
     with st.expander("Rechazar y solicitar nueva foto sin borrar el original"):
         with st.form(f"reject_{record['job_id']}"):
             reason = st.text_area("Motivo", key=f"reject_reason_{record['job_id']}")
@@ -865,27 +1227,41 @@ def render_review() -> None:
                 st.error(result.get("message", "No se pudo rechazar."))
 
 
-def main() -> None:
-    render_header()
-    st.info(
-        "Fase 7: revisión humana, correcciones y confirmación idempotente. "
-        "Gemini continúa desactivado y consume cero tokens."
-    )
-    setup_tab, upload_tab, queue_tab, ocr_tab, review_tab, knowledge_tab = st.tabs(
-        ["Preparar", "Cargar", "Cola", "OCR local", "Revisión", "Conocimiento"]
-    )
-    with setup_tab:
-        render_setup()
-    with upload_tab:
-        render_upload()
+def render_processing() -> None:
+    queue_tab, ocr_tab = st.tabs(["Cola persistente", "Ejecutar OCR local"])
     with queue_tab:
         render_queue()
     with ocr_tab:
         render_local_ocr()
+
+
+def main() -> None:
+    render_header()
+    dashboard_tab, upload_tab, process_tab, review_tab, results_tab, knowledge_tab, config_tab = st.tabs(
+        [
+            "Dashboard",
+            "Cargar",
+            "Procesar",
+            "Revisión",
+            "Resultados",
+            "Conocimiento",
+            "Configuración",
+        ]
+    )
+    with dashboard_tab:
+        render_dashboard()
+    with upload_tab:
+        render_upload()
+    with process_tab:
+        render_processing()
     with review_tab:
         render_review()
+    with results_tab:
+        render_results()
     with knowledge_tab:
         render_knowledge()
+    with config_tab:
+        render_configuration()
     st.caption(f"{APP_NAME} · {APP_VERSION}")
 
 
