@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
@@ -470,7 +471,8 @@ def render_ocr_result_viewer() -> None:
 
     extraction = payload.get("extraction") or {}
     if extraction:
-        st.markdown("#### Datos del peaje")
+        document_type = extraction.get("document_type", selected.get("tipo_documento", ""))
+        st.markdown(f"#### Datos extraídos · {document_type}")
         extraction_columns = st.columns(3)
         extraction_columns[0].metric(
             "Confianza global",
@@ -487,10 +489,16 @@ def render_ocr_result_viewer() -> None:
         field_rows = []
         candidate_rows = []
         for field_name, field_data in (extraction.get("fields") or {}).items():
+            display_value = field_data.get("value")
+            if field_name == "items_json" and display_value:
+                try:
+                    display_value = f"{len(json.loads(display_value))} ítem(s) estructurado(s)"
+                except (json.JSONDecodeError, TypeError):
+                    display_value = "Ítems pendientes de revisión"
             field_rows.append(
                 {
                     "campo": field_name,
-                    "valor": field_data.get("value"),
+                    "valor": display_value,
                     "confianza_final": field_data.get("confidence_final", 0),
                     "confianza_ocr": field_data.get("confidence_ocr", 0),
                     "fuente": field_data.get("source", "OCR"),
@@ -590,6 +598,55 @@ def render_local_ocr() -> None:
     render_ocr_worker()
     st.divider()
     render_ocr_result_viewer()
+
+
+def render_knowledge() -> None:
+    st.subheader("Diccionarios y plantillas")
+    if not infrastructure_ready():
+        st.warning("Completa la infraestructura antes de consultar el conocimiento.")
+        return
+    try:
+        credentials = get_credentials()
+        spreadsheet_id = get_secret("GOOGLE_SHEET_ID")
+        dictionaries = read_records(credentials, spreadsheet_id, "DICCIONARIOS")
+        templates = read_records(credentials, spreadsheet_id, "PLANTILLAS")
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"No se pudieron leer diccionarios o plantillas: {type(exc).__name__}.")
+        return
+
+    active_values = {"true", "1", "si", "sí", "activo", "yes"}
+    active_dictionaries = [
+        row
+        for row in dictionaries
+        if row.get("activo", "").strip().casefold() in active_values
+    ]
+    active_templates = [
+        row
+        for row in templates
+        if row.get("activo", "").strip().casefold() in active_values
+    ]
+    first, second = st.columns(2)
+    first.metric("Diccionarios activos", len(active_dictionaries))
+    second.metric("Plantillas activas", len(active_templates))
+    st.info(
+        "Las correcciones no entrenan una IA automáticamente. En las siguientes fases podrán "
+        "convertirse en variantes, relaciones RUC–proveedor o regiones reutilizables."
+    )
+    with st.expander("Formato admitido para regiones de plantilla"):
+        st.code("0.10,0.05,0.90,0.25", language="text")
+        st.caption(
+            "Orden: x1, y1, x2, y2; valores entre 0 y 1 relativos al documento procesado."
+        )
+    st.markdown("#### DICCIONARIOS")
+    if dictionaries:
+        st.dataframe(dictionaries, hide_index=True, width="stretch")
+    else:
+        st.caption("Todavía no existen entradas. No es obligatorio crearlas para la primera prueba.")
+    st.markdown("#### PLANTILLAS")
+    if templates:
+        st.dataframe(templates, hide_index=True, width="stretch")
+    else:
+        st.caption("Todavía no existen plantillas. El OCR local general seguirá funcionando.")
 
 
 def main() -> None:
