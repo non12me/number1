@@ -595,11 +595,11 @@ def render_local_ocr() -> None:
 def main() -> None:
     render_header()
     st.info(
-        "Fase 5: candidatos, validaciones, confianza y extracción estructurada de peajes. "
+        "Fase 6: boletas, facturas, ítems, diccionarios y plantillas reutilizables. "
         "Gemini continúa desactivado y consume cero tokens."
     )
-    setup_tab, upload_tab, queue_tab, ocr_tab = st.tabs(
-        ["Preparar", "Cargar", "Cola", "OCR local"]
+    setup_tab, upload_tab, queue_tab, ocr_tab, knowledge_tab = st.tabs(
+        ["Preparar", "Cargar", "Cola", "OCR local", "Conocimiento"]
     )
     with setup_tab:
         render_setup()
@@ -609,6 +609,8 @@ def main() -> None:
         render_queue()
     with ocr_tab:
         render_local_ocr()
+    with knowledge_tab:
+        render_knowledge()
     st.caption(f"{APP_NAME} · {APP_VERSION}")
 
 
