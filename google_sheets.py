@@ -93,6 +93,10 @@ DEFAULT_CONFIG = [
     ["umbral_revision", "0.75", "decimal", "Dato que requiere recuperación", "", "SISTEMA"],
     ["tolerancia_monetaria", "0.02", "decimal", "Tolerancia de importes", "", "SISTEMA"],
     ["gemini_enabled", "false", "bool", "Interruptor de Gemini", "", "SISTEMA"],
+    ["gemini_emergency_stop", "false", "bool", "Bloqueo inmediato de Gemini", "", "SISTEMA"],
+    ["gemini_model", "gemini-3.5-flash-lite", "text", "Modelo estable de bajo consumo", "", "SISTEMA"],
+    ["gemini_max_requests_day", "50", "int", "Límite diario de solicitudes", "", "SISTEMA"],
+    ["gemini_max_output_tokens", "256", "int", "Salida máxima por solicitud", "", "SISTEMA"],
 ]
 
 
@@ -229,6 +233,49 @@ def read_records(
     return records
 
 
+def read_multiple_records(
+    credentials: Credentials,
+    spreadsheet_id: str,
+    sheet_names: Iterable[str],
+) -> dict[str, list[dict[str, str]]]:
+    """Lee varias pestañas en una sola petición de Google Sheets."""
+    names = list(dict.fromkeys(sheet_names))
+    if any(name not in SHEET_HEADERS for name in names):
+        raise ValueError("Pestaña no permitida.")
+    if not names:
+        return {}
+    ranges = [
+        f"{_quote_sheet(name)}!A:{_column_letter(len(SHEET_HEADERS[name]))}"
+        for name in names
+    ]
+    response = build_sheets_service(credentials).spreadsheets().values().batchGet(
+        spreadsheetId=spreadsheet_id,
+        ranges=ranges,
+    ).execute()
+    value_ranges = response.get("valueRanges", [])
+    result: dict[str, list[dict[str, str]]] = {}
+    for index, name in enumerate(names):
+        values = value_ranges[index].get("values", []) if index < len(value_ranges) else []
+        headers = SHEET_HEADERS[name]
+        rows: list[dict[str, str]] = []
+        for row in values[1:]:
+            padded = list(row) + [""] * (len(headers) - len(row))
+            rows.append(
+                {header: str(padded[position]) for position, header in enumerate(headers)}
+            )
+        result[name] = rows
+    return result
+
+
+def configuration_map(records: Iterable[dict[str, str]]) -> dict[str, str]:
+    """Convierte CONFIGURACION a un mapa normalizado clave–valor."""
+    return {
+        str(record.get("clave", "")).strip(): str(record.get("valor", "")).strip()
+        for record in records
+        if str(record.get("clave", "")).strip()
+    }
+
+
 def append_records(
     credentials: Credentials,
     spreadsheet_id: str,
@@ -335,3 +382,4 @@ def upsert_record(
         body={"values": row_values},
     ).execute()
     return "UPDATED"
+
