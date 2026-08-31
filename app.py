@@ -19,8 +19,9 @@ from config import (
     MAX_FILE_SIZE_MB,
     PROJECT_PHASE,
 )
+from confirmation import confirm_review, reject_review, save_review_draft, suggested_filename
 from google_auth import get_google_credentials
-from google_drive import ensure_storage_folders, validate_folder
+from google_drive import download_file_bytes, ensure_storage_folders, validate_folder
 from google_sheets import ensure_workbook_structure, read_records
 from local_ocr import OCRModelLoadError, get_ocr_engine
 from models import DocumentType
@@ -30,6 +31,7 @@ from ocr_worker import (
     retry_local_ocr_errors,
 )
 from queue_manager import enqueue_upload, recover_upload_checkpoints
+from review import FIELD_LABELS, build_review_previews, field_names, values_from_payload
 from upload_manager import prepare_upload
 from utils import decode_json_from_sheet, pdf_page_count
 
@@ -293,13 +295,14 @@ def render_queue() -> None:
         return
 
     counts = Counter(record.get("estado", "SIN_ESTADO") for record in records)
-    columns = st.columns(6)
+    columns = st.columns(7)
     columns[0].metric("Jobs totales", len(records))
     columns[1].metric("Pendientes", counts.get("PENDIENTE", 0))
     columns[2].metric("Procesando", counts.get("PROCESANDO", 0))
     columns[3].metric("OCR local", counts.get("EXTRAIDO_LOCAL", 0))
     columns[4].metric("Revisión", counts.get("NECESITA_REVISION", 0))
     columns[5].metric("Errores", counts.get("ERROR", 0))
+    columns[6].metric("Confirmados", counts.get("CONFIRMADO", 0))
 
     if st.button("Recuperar cargas interrumpidas", width="stretch"):
         recovered = recover_upload_checkpoints(
@@ -649,14 +652,227 @@ def render_knowledge() -> None:
         st.caption("Todavía no existen plantillas. El OCR local general seguirá funcionando.")
 
 
+def _reviewable_records() -> list[dict[str, str]]:
+    records = read_records(get_credentials(), get_secret("GOOGLE_SHEET_ID"), "OCR_COLA")
+    allowed = {"EXTRAIDO_LOCAL", "NECESITA_REVISION", "PENDIENTE_RESULTADO"}
+    return [
+        record
+        for record in records
+        if record.get("estado") in allowed and record.get("datos_extraidos_json")
+    ]
+
+
+def _render_original_preview(record: dict[str, str]) -> None:
+    st.markdown("#### Documento")
+    cache_key = f"review_preview_{record['job_id']}"
+    if st.button(
+        "Cargar vista previa",
+        key=f"load_preview_{record['job_id']}",
+        width="stretch",
+    ):
+        try:
+            for key in list(st.session_state):
+                if key.startswith("review_preview_") and key != cache_key:
+                    del st.session_state[key]
+            original_bytes = download_file_bytes(
+                get_credentials(), record.get("drive_file_id", "")
+            )
+            st.session_state[cache_key] = build_review_previews(
+                original_bytes,
+                record.get("mime_type", ""),
+                record.get("pagina_pdf", ""),
+            )
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"No se pudo cargar la vista previa: {type(exc).__name__}.")
+    previews = st.session_state.get(cache_key)
+    if previews is None:
+        st.caption("La vista se descarga bajo pedido; el original permanece en Drive.")
+        return
+    original, processed = previews
+    st.image(
+        original,
+        caption=f"Original · {record.get('nombre_original', '')}",
+        channels="BGR",
+        width="stretch",
+    )
+    if st.checkbox(
+        "Comparar con preprocesamiento A",
+        key=f"show_processed_{record['job_id']}",
+    ):
+        st.image(
+            processed,
+            caption="Orientación, perspectiva y contraste usados por OCR",
+            channels="BGR",
+            width="stretch",
+        )
+
+
+def render_review() -> None:
+    st.subheader("Revisión humana y confirmación")
+    flash = st.session_state.pop("review_flash", "")
+    if flash:
+        st.success(flash)
+    if not infrastructure_ready():
+        st.warning("Completa la infraestructura antes de revisar documentos.")
+        return
+    try:
+        records = _reviewable_records()
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"No se pudo cargar la revisión: {type(exc).__name__}.")
+        return
+    if not records:
+        st.success("No hay documentos pendientes de revisión o confirmación.")
+        return
+
+    selected_id = st.selectbox(
+        "Documento pendiente",
+        options=[record["job_id"] for record in reversed(records)],
+        format_func=lambda value: next(
+            (
+                f"{row.get('nombre_original', '')} · {row.get('tipo_documento', '')} · "
+                f"{row.get('estado', '')}"
+                for row in records
+                if row["job_id"] == value
+            ),
+            value,
+        ),
+        key="review_job_id",
+    )
+    record = next(row for row in records if row["job_id"] == selected_id)
+    try:
+        payload = decode_json_from_sheet(record["datos_extraidos_json"])
+        values = values_from_payload(payload, record.get("tipo_documento", ""))
+    except Exception:  # noqa: BLE001
+        st.error("El checkpoint de este documento no contiene JSON válido.")
+        return
+
+    extraction = payload.get("extraction") or {}
+    confidence = float(extraction.get("global_confidence", 0) or 0)
+    first, second, third = st.columns(3)
+    first.metric("Estado", record.get("estado", ""))
+    second.metric("Confianza global", f"{confidence:.1%}")
+    third.metric("Gemini", "No utilizado")
+    blocking = extraction.get("blocking_validations") or []
+    if blocking:
+        st.warning("Revisa: " + " | ".join(blocking))
+
+    preview_column, form_column = st.columns([1, 1], gap="large")
+    with preview_column:
+        _render_original_preview(record)
+        with st.expander("Texto OCR"):
+            lines = [
+                line.get("text", "")
+                for page in payload.get("pages", [])
+                for line in page.get("lines", [])
+            ]
+            st.text("\n".join(lines) if lines else "Sin texto reconocido.")
+
+    with form_column:
+        st.markdown("#### Datos editables")
+        field_metadata = extraction.get("fields") or {}
+        edited: dict[str, str] = {}
+        with st.form(f"review_form_{record['job_id']}"):
+            for field in field_names(record.get("tipo_documento", "")):
+                metadata = field_metadata.get(field) or {}
+                score = float(metadata.get("confidence_final", 0) or 0)
+                source = metadata.get("source", "OCR")
+                indicator = "🟢" if score >= 0.90 else "🟡" if score >= 0.75 else "🔴"
+                label = f"{indicator} {FIELD_LABELS.get(field, field)}"
+                help_text = f"Confianza {score:.1%} · Fuente {source}"
+                if field == "items_json":
+                    edited[field] = st.text_area(
+                        label,
+                        value=values.get(field, ""),
+                        help=help_text,
+                        key=f"edit_{record['job_id']}_{field}",
+                        height=120,
+                    )
+                else:
+                    edited[field] = st.text_input(
+                        label,
+                        value=values.get(field, ""),
+                        help=help_text,
+                        key=f"edit_{record['job_id']}_{field}",
+                    )
+            st.caption("Nombre sugerido: " + suggested_filename(record, edited))
+            approve = st.checkbox(
+                "He comparado los datos con el original y confirmo que son correctos",
+                key=f"approve_{record['job_id']}",
+            )
+            save_column, confirm_column = st.columns(2)
+            with save_column:
+                save_pressed = st.form_submit_button(
+                    "Guardar correcciones", width="stretch"
+                )
+            with confirm_column:
+                confirm_pressed = st.form_submit_button(
+                    "Confirmar y mover", type="primary", width="stretch"
+                )
+
+        if save_pressed:
+            result = save_review_draft(
+                get_credentials(),
+                get_secret("GOOGLE_SHEET_ID"),
+                record["job_id"],
+                edited,
+                get_secret("APP_ADMIN_EMAIL") or "ADMIN_NO_CONFIGURADO",
+            )
+            if result.get("status") == "GUARDADO":
+                st.success(result["message"])
+                if result.get("errors"):
+                    st.warning("Pendiente: " + " | ".join(result["errors"]))
+            else:
+                st.warning(result.get("message", result.get("status", "No guardado")))
+
+        if confirm_pressed:
+            if not approve:
+                st.error("Marca la confirmación de revisión humana antes de continuar.")
+            else:
+                with st.spinner("Confirmando sin duplicar resultados..."):
+                    result = confirm_review(
+                        get_credentials(),
+                        get_secret("GOOGLE_SHEET_ID"),
+                        get_secret("DRIVE_CONFIRMED_FOLDER_ID"),
+                        record["job_id"],
+                        edited,
+                        get_secret("APP_ADMIN_EMAIL") or "ADMIN_NO_CONFIGURADO",
+                    )
+                if result.get("status") == "CONFIRMADO":
+                    st.session_state["review_flash"] = result["message"]
+                    st.rerun()
+                elif result.get("status") == "VALIDACION_ERROR":
+                    st.error("No se confirmó: " + " | ".join(result.get("errors", [])))
+                else:
+                    st.warning(result.get("message", result.get("status", "No completado")))
+
+    with st.expander("Rechazar y solicitar nueva foto sin borrar el original"):
+        with st.form(f"reject_{record['job_id']}"):
+            reason = st.text_area("Motivo", key=f"reject_reason_{record['job_id']}")
+            reject_pressed = st.form_submit_button(
+                "Rechazar y solicitar nueva foto", width="stretch"
+            )
+        if reject_pressed:
+            result = reject_review(
+                get_credentials(),
+                get_secret("GOOGLE_SHEET_ID"),
+                record["job_id"],
+                reason,
+                get_secret("APP_ADMIN_EMAIL") or "ADMIN_NO_CONFIGURADO",
+            )
+            if result.get("status") == "RECHAZADO":
+                st.success(result["message"])
+            else:
+                st.error(result.get("message", "No se pudo rechazar."))
+
+
 def main() -> None:
     render_header()
     st.info(
-        "Fase 6: boletas, facturas, ítems, diccionarios y plantillas reutilizables. "
+        "Fase 7: revisión humana, correcciones y confirmación idempotente. "
         "Gemini continúa desactivado y consume cero tokens."
     )
-    setup_tab, upload_tab, queue_tab, ocr_tab, knowledge_tab = st.tabs(
-        ["Preparar", "Cargar", "Cola", "OCR local", "Conocimiento"]
+    setup_tab, upload_tab, queue_tab, ocr_tab, review_tab, knowledge_tab = st.tabs(
+        ["Preparar", "Cargar", "Cola", "OCR local", "Revisión", "Conocimiento"]
     )
     with setup_tab:
         render_setup()
@@ -666,6 +882,8 @@ def main() -> None:
         render_queue()
     with ocr_tab:
         render_local_ocr()
+    with review_tab:
+        render_review()
     with knowledge_tab:
         render_knowledge()
     st.caption(f"{APP_NAME} · {APP_VERSION}")
